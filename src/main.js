@@ -11,9 +11,9 @@ const OVERPASS_ENDPOINTS = [
 ];
 
 const FALLBACK_HALF_SPAN = {
-  large: 0.08,
-  medium: 0.04,
-  small: 0.02,
+  large: 0.055,
+  medium: 0.03,
+  small: 0.015,
 };
 
 const WORLD_VIEW = { center: [25, 15], zoom: 2 };
@@ -208,16 +208,73 @@ function collectCoords(geom) {
   return coords;
 }
 
-function boundsFromOverpass(geojson) {
-  const features = geojson?.features || [];
-  if (!features.length) return null;
+function featureCentroid(f) {
+  const coords = collectCoords(f.geometry);
+  if (!coords.length) return null;
+  let lat = 0;
+  let lon = 0;
+  for (const [la, lo] of coords) {
+    lat += la;
+    lon += lo;
+  }
+  return L.latLng(lat / coords.length, lon / coords.length);
+}
 
-  // Prefer aerodrome polygons / multipolygons
+function pickBestAerodromeFeatures(features, a) {
+  if (!features.length) return [];
   const preferred = features.filter((f) => {
     const t = f.geometry?.type;
     return t === 'Polygon' || t === 'MultiPolygon';
   });
-  const use = preferred.length ? preferred : features;
+  const pool = preferred.length ? preferred : features;
+  const point = L.latLng(a.lat, a.lon);
+
+  const containing = [];
+  const scored = [];
+  for (const f of pool) {
+    const coords = collectCoords(f.geometry);
+    if (!coords.length) continue;
+    const b = L.latLngBounds(coords);
+    const c = featureCentroid(f);
+    const dist = c ? point.distanceTo(c) : Infinity;
+    if (b.contains(point)) containing.push({ f, b, dist });
+    scored.push({ f, b, dist });
+  }
+
+  const candidates = containing.length ? containing : scored;
+  if (!candidates.length) return [];
+
+  candidates.sort((x, y) => x.dist - y.dist);
+  const best = candidates[0];
+
+  // Keep only features that clearly belong to the same footprint
+  // (near the best match), so neighboring airports are not merged.
+  const maxExtra = Math.max(best.b.getNorth() - best.b.getSouth(), best.b.getEast() - best.b.getWest()) * 0.35;
+  const kept = [];
+  for (const c of candidates) {
+    if (c === best) {
+      kept.push(c.f);
+      continue;
+    }
+    if (c.dist <= best.dist + 800 && best.b.intersects(c.b.pad(0.05))) {
+      const extra = Math.max(
+        Math.abs(c.b.getNorth() - best.b.getNorth()),
+        Math.abs(c.b.getSouth() - best.b.getSouth()),
+        Math.abs(c.b.getEast() - best.b.getEast()),
+        Math.abs(c.b.getWest() - best.b.getWest()),
+      );
+      if (extra <= maxExtra + 0.01) kept.push(c.f);
+    }
+  }
+  return kept.length ? kept : [best.f];
+}
+
+function boundsFromOverpass(geojson, a) {
+  const features = geojson?.features || [];
+  if (!features.length) return null;
+
+  const use = pickBestAerodromeFeatures(features, a);
+  if (!use.length) return null;
 
   let bounds = null;
   const outlineFeatures = [];
@@ -235,11 +292,11 @@ function boundsFromOverpass(geojson) {
     }
   }
 
-  return { bounds, outlineFeatures };
+  return bounds ? { bounds, outlineFeatures } : null;
 }
 
 async function queryOverpass(a, signal) {
-  const radius = a.type === 'large' ? 15000 : a.type === 'medium' ? 10000 : 6000;
+  const radius = a.type === 'large' ? 12000 : a.type === 'medium' ? 8000 : 5000;
   // Around airport; fetch aerodrome ways/relations (footprint)
   const query = `
 [out:json][timeout:25];
@@ -345,7 +402,7 @@ async function fitAirport(a) {
   let bounds = null;
   try {
     const geojson = await queryOverpass(a, signal);
-    const parsed = boundsFromOverpass(geojson);
+    const parsed = boundsFromOverpass(geojson, a);
     if (parsed?.bounds && parsed.bounds.isValid()) {
       bounds = parsed.bounds;
       drawOutline(parsed.outlineFeatures);
@@ -361,13 +418,14 @@ async function fitAirport(a) {
     showStatus('Overpass 超时/失败，使用估算范围');
   }
 
-  // Mobile padding: top search + bottom sheet
+  // Mobile padding: top search + bottom sheet — keep whole airport on one screen
   const padTop = 72 + (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--safe-top')) || 0);
-  const padBottom = el.sheet.hidden ? 24 : 180;
+  const padBottom = el.sheet.hidden ? 24 : 170;
+  map.invalidateSize();
   map.fitBounds(bounds, {
-    paddingTopLeft: [24, padTop],
-    paddingBottomRight: [24, padBottom],
-    maxZoom: 16,
+    paddingTopLeft: [16, padTop],
+    paddingBottomRight: [16, padBottom],
+    maxZoom: 15,
     animate: true,
   });
 
@@ -434,15 +492,42 @@ function wireUi() {
     }
   });
 
-  // Deep link: ?q=CTU or #CTU
+}
+
+function applyDeepLink() {
+  // Deep link: ?q=CTU or #CTU / #PVG — must run after airports.json is loaded
   const params = new URLSearchParams(location.search);
-  const q = params.get('q') || params.get('iata') || decodeURIComponent(location.hash.slice(1));
-  if (q) {
-    el.input.value = q;
-    el.clear.hidden = false;
-    const hits = searchAirports(q);
-    if (hits.length) selectAirport(hits[0], { fit: true });
+  let q = params.get('q') || params.get('iata') || '';
+  if (!q && location.hash.length > 1) {
+    try {
+      q = decodeURIComponent(location.hash.slice(1));
+    } catch {
+      q = location.hash.slice(1);
+    }
   }
+  q = (q || '').trim();
+  if (!q) return false;
+
+  el.input.value = q;
+  el.clear.hidden = false;
+  const hits = searchAirports(q);
+  if (!hits.length) {
+    renderResults([]);
+    showStatus(`未找到机场：${q}`);
+    setTimeout(() => showStatus(''), 2500);
+    return false;
+  }
+
+  // Prefer exact IATA / ICAO / ident match when the query looks like a code
+  const upper = normalizeQuery(q);
+  const exact =
+    hits.find((a) => a.iata === upper) ||
+    hits.find((a) => a.icao === upper) ||
+    hits.find((a) => a.ident === upper) ||
+    hits[0];
+
+  selectAirport(exact, { fit: true });
+  return true;
 }
 
 async function loadData() {
@@ -460,6 +545,10 @@ async function main() {
   try {
     await loadData();
     addMarkers();
+    // Wait a tick so markers/cluster + sheet layout exist before fitBounds
+    requestAnimationFrame(() => {
+      applyDeepLink();
+    });
   } catch (err) {
     console.error(err);
     showStatus('机场数据加载失败');
