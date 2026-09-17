@@ -81,6 +81,12 @@ OSM tile attribution is shown on the map: © OpenStreetMap contributors.
 - leaflet.markercluster
 - Overpass API (runtime)
 
+## Offline usage · 离线使用
+
+详见调查报告：[docs/offline-usage-investigation.md](./docs/offline-usage-investigation.md)
+
+覆盖 PWA 缓存、PMTiles/MBTiles、预计算机场足迹、桌面/移动壳、局域网 Docker 等断网方案。
+
 ## License / credits
 
 Airport metadata © OurAirports contributors. Map data © OpenStreetMap contributors.
