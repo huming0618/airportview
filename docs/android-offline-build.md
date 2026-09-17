@@ -1,19 +1,40 @@
 # 机场全景 · Airport View（Android 离线版）
 
-Capacitor 包装的现有 Vite + Leaflet Web 应用，面向 Android 的离线 MVP。
+Capacitor 包装的 Vite + Leaflet Web 应用，面向 Android 的离线 MVP。
 
 - **包名**：`com.huming.airportview`
 - **调试 APK**：`/workspace/deliverables/airportview-offline-debug.apk`（构建产物也可在 `android/app/build/outputs/apk/debug/app-debug.apk`）
 
-## 离线设计（MVP）
+## 离线设计
 
 | 层级 | 能力 | 实现 |
 |------|------|------|
 | L1 应用壳 + 机场索引 | 断网可搜索/选中 | 打包 `public/data/airports.json`（~6300 机场） |
-| L2 机场足迹 | 一屏适配不依赖 Overpass | 每条机场预置 `bbox: [south,west,north,east]`（按 large/medium/small 半幅估算）；`fitAirport` **优先本地 bbox**，仅在线时可选 Overpass 精细轮廓 |
-| L3 底图瓦片 | 有缓存则离线显示 | Cache API 缓存 OSM 瓦片；按钮「缓存此机场离线地图」预取 z12–z16；未命中时中文提示「请先联网缓存该机场周边地图」 |
+| L2 机场足迹 | 一屏适配不依赖 Overpass | 每条机场预置 `bbox: [south,west,north,east]`；`fitAirport` **优先本地 bbox**，仅在线时可选 Overpass 精细轮廓 |
+| L3 底图瓦片 | **常用机场开箱离线** | 预置 `public/offline-tiles/{z}/{x}/{y}.png`（z12–z15）；运行时 Cache API；按钮可联网预取其它机场 |
 
-**不会**内置全球瓦片；请先联网对目标机场点「缓存此机场离线地图」，再断网使用。
+### 内置离线底图（L3 预置）
+
+以下机场按各自 `bbox` 预下载栅格瓦片（z12–z15），随 APK 打包，**无需先点「缓存」即可离线显示**：
+
+`CTU` `TFU` `PVG` `PEK` `CAN` `SHA` `HKG` `LAX` `NRT` `LHR`
+
+瓦片加载顺序：
+
+1. 内置 `offline-tiles/{z}/{x}/{y}.png`（`import.meta.env.BASE_URL`）
+2. Cache API（运行时缓存）
+3. 网络（在线时）
+
+首次启动会尽量把内置瓦片暖进 Cache API（best-effort）。其它机场仍需联网点「缓存此机场离线地图」。
+
+重新生成瓦片包：
+
+```bash
+npm run seed-offline-tiles
+# 约 1.5 req/s，User-Agent 可识别；OSM 受限时自动回退 Carto Positron
+```
+
+产物：`public/offline-tiles/` + `manifest.json`（机场列表、瓦片数、来源归属）。
 
 ## 环境要求
 
@@ -36,8 +57,9 @@ sdk.dir=/workspace/android-sdk
 ## 重新构建
 
 ```bash
-cd /workspace/airportview-android   # 或本仓库中对应目录
+cd /workspace/airportview-android   # 或本仓库根目录（含 android/）
 npm install
+# 可选：npm run seed-offline-tiles
 VITE_BASE=./ npm run build
 npx cap sync android
 cd android
@@ -60,16 +82,16 @@ adb install -r /workspace/deliverables/airportview-offline-debug.apk
 ## 验收建议
 
 1. 安装后开飞行模式：搜索 CTU / PVG 等应能出结果。
-2. 选中机场应立即按本地 bbox 缩放到一屏。
-3. 若从未缓存瓦片：地图空白/灰，状态栏提示先联网缓存。
+2. 选中 **CTU**（或其它内置机场）应立即按本地 bbox 缩放，**无需点缓存**即可看到底图瓦片。
+3. 未内置的机场：地图可能空白/灰，状态栏提示可联网缓存；离线横幅文案为「常用机场已内置离线底图；其他机场仍可联网缓存」。
 4. 联网后点「缓存此机场离线地图」，再断网应能看到已缓存区域底图。
 
 ## 与线上 Web 的关系
 
-本目录为 **Android / 离线包专用副本**（`VITE_BASE=./`），避免改坏 GitHub Pages 的 `/airportview/` 基路径。离线相关源码也可同步回主仓库 `src/`（主站仍用 `VITE_BASE=/airportview/` 构建）。
+Android / 离线包使用 `VITE_BASE=./`。离线相关源码与 `public/offline-tiles` 同步在 GitHub `huming0618/airportview`；主站 GitHub Pages 仍可用 `VITE_BASE=/airportview/` 构建。
 
 ## 许可与合规
 
-- 地图数据 © OpenStreetMap contributors（ODbL）
+- 地图数据 © OpenStreetMap contributors（ODbL）；预置瓦片可能来自 OSM 官方栅格或 CARTO Positron（见 `offline-tiles/manifest.json`）
 - 机场元数据来自 OurAirports 衍生数据
-- 请勿对 `tile.openstreetmap.org` 做大规模批量下载；本 MVP 预取已限制并发与总量（约 ≤800 瓦片/次）
+- 批量预下载仅覆盖少数机场 bbox × z12–z15，并限速；请勿对 tile 服务做城市级 / 全球级抓取

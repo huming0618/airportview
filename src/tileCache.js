@@ -1,11 +1,27 @@
 /**
- * OSM tile cache via Cache API (works in Capacitor WebView + browsers).
- * Online: fetch + store. Offline: serve from cache or signal miss.
+ * Tile load order:
+ *  1) Bundled offline-tiles/{z}/{x}/{y}.png (BASE_URL)
+ *  2) Cache API (runtime OSM prefetch)
+ *  3) Network (if online)
  */
 
 const CACHE_NAME = 'airportview-osm-tiles-v1';
 const TILE_URL_TEMPLATE = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const SUBDOMAINS = ['a', 'b', 'c'];
+
+function appBase() {
+  try {
+    const b = import.meta.env.BASE_URL || './';
+    return b.endsWith('/') ? b : `${b}/`;
+  } catch {
+    return './';
+  }
+}
+
+/** Bundled asset URL for a z/x/y tile (relative to Vite base). */
+export function bundledTileUrl(z, x, y) {
+  return `${appBase()}offline-tiles/${z}/${x}/${y}.png`;
+}
 
 export function tileUrl(z, x, y) {
   const s = SUBDOMAINS[(x + y) % SUBDOMAINS.length];
@@ -25,7 +41,37 @@ async function openCache() {
   }
 }
 
-/** Create a Leaflet TileLayer that reads/writes Cache API. */
+function objectUrlFromBlob(blob) {
+  return URL.createObjectURL(blob);
+}
+
+/** Try loading a bundled tile; returns blob or null. */
+async function tryBundled(z, x, y) {
+  const url = bundledTileUrl(z, x, y);
+  try {
+    const res = await fetch(url, { cache: 'force-cache' });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size < 50) return null;
+    return { blob, bundledUrl: url };
+  } catch {
+    return null;
+  }
+}
+
+async function matchCacheAnySubdomain(cache, url) {
+  const hit = await cache.match(url);
+  if (hit) return hit;
+  for (const s of SUBDOMAINS) {
+    const alt = url.replace(/\/\/[abc]\./, `//${s}.`);
+    const h = await cache.match(alt);
+    if (h) return h;
+  }
+  // Also match bundled-path cache keys if warmed
+  return null;
+}
+
+/** Create a Leaflet TileLayer that prefers bundled → Cache API → network. */
 export function createCachedTileLayer(L, options = {}) {
   const TileLayerCached = L.TileLayer.extend({
     createTile(coords, done) {
@@ -38,26 +84,52 @@ export function createCachedTileLayer(L, options = {}) {
         tile.crossOrigin = this.options.crossOrigin === true ? '' : this.options.crossOrigin;
       }
       tile.src = '';
+      const z = coords.z;
+      const x = coords.x;
+      const y = coords.y;
       const url = this.getTileUrl(coords);
-      this._loadCached(url, tile, done);
+      this._loadCached(z, x, y, url, tile, done);
       return tile;
     },
 
-    async _loadCached(url, tile, done) {
+    async _loadCached(z, x, y, url, tile, done) {
       const cache = await openCache();
       try {
+        // (a) Bundled offline tiles
+        const bundled = await tryBundled(z, x, y);
+        if (bundled) {
+          tile.src = objectUrlFromBlob(bundled.blob);
+          tile.dataset.fromBundled = '1';
+          // Optionally mirror into Cache API under network URL for consistency
+          if (cache) {
+            try {
+              await cache.put(
+                url,
+                new Response(bundled.blob.slice(), {
+                  headers: { 'Content-Type': 'image/png' },
+                }),
+              );
+            } catch {
+              /* quota */
+            }
+          }
+          return;
+        }
+
+        // (b) Cache API
         if (cache) {
-          const hit = await cache.match(url);
+          const hit = await matchCacheAnySubdomain(cache, url);
           if (hit) {
             const blob = await hit.blob();
-            tile.src = URL.createObjectURL(blob);
+            tile.src = objectUrlFromBlob(blob);
             tile.dataset.fromCache = '1';
             return;
           }
         }
+
+        // (c) Network
         if (!isOnline()) {
           tile.dataset.miss = '1';
-          // trigger error so Leaflet knows; also notify app
           tile.src =
             'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
           this.fire('tileoffline', { url });
@@ -69,24 +141,35 @@ export function createCachedTileLayer(L, options = {}) {
         const blob = await res.blob();
         if (cache) {
           try {
-            await cache.put(url, new Response(blob.slice(), { headers: { 'Content-Type': blob.type || 'image/png' } }));
+            await cache.put(
+              url,
+              new Response(blob.slice(), {
+                headers: { 'Content-Type': blob.type || 'image/png' },
+              }),
+            );
           } catch {
             /* quota */
           }
         }
-        tile.src = URL.createObjectURL(blob);
+        tile.src = objectUrlFromBlob(blob);
       } catch (err) {
         if (cache) {
-          // try alternate subdomain cache keys
           for (const s of SUBDOMAINS) {
             const alt = url.replace(/\/\/[abc]\./, `//${s}.`);
             const hit = await cache.match(alt);
             if (hit) {
               const blob = await hit.blob();
-              tile.src = URL.createObjectURL(blob);
+              tile.src = objectUrlFromBlob(blob);
               return;
             }
           }
+        }
+        // Last chance: bundled again (in case race)
+        const bundled = await tryBundled(z, x, y);
+        if (bundled) {
+          tile.src = objectUrlFromBlob(bundled.blob);
+          tile.dataset.fromBundled = '1';
+          return;
         }
         tile.dataset.miss = '1';
         this.fire('tileoffline', { url, err });
@@ -98,7 +181,7 @@ export function createCachedTileLayer(L, options = {}) {
   return new TileLayerCached(TILE_URL_TEMPLATE, {
     maxZoom: 19,
     attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
     crossOrigin: true,
     ...options,
   });
@@ -141,7 +224,6 @@ export async function prefetchTiles(bounds, zMin = 12, zMax = 16, onProgress) {
     }
   }
 
-  // Cap to avoid hammering OSM — soft limit for demo
   const MAX = 800;
   const list = jobs.slice(0, MAX);
   let ok = 0;
@@ -159,16 +241,27 @@ export async function prefetchTiles(bounds, zMin = 12, zMax = 16, onProgress) {
         if (existing) {
           ok++;
         } else {
-          const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
-          if (!res.ok) throw new Error(String(res.status));
-          const blob = await res.blob();
-          await cache.put(
-            url,
-            new Response(blob, { headers: { 'Content-Type': blob.type || 'image/png' } }),
-          );
-          ok++;
-          // be nice to OSM
-          await new Promise((r) => setTimeout(r, 80));
+          // Prefer bundled if present (warm cache without network)
+          const bundled = await tryBundled(z, x, y);
+          if (bundled) {
+            await cache.put(
+              url,
+              new Response(bundled.blob, {
+                headers: { 'Content-Type': 'image/png' },
+              }),
+            );
+            ok++;
+          } else {
+            const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
+            if (!res.ok) throw new Error(String(res.status));
+            const blob = await res.blob();
+            await cache.put(
+              url,
+              new Response(blob, { headers: { 'Content-Type': blob.type || 'image/png' } }),
+            );
+            ok++;
+            await new Promise((r) => setTimeout(r, 80));
+          }
         }
       } catch {
         fail++;
@@ -186,4 +279,76 @@ export async function countCachedTilesApprox() {
   if (!cache) return 0;
   const keys = await cache.keys();
   return keys.length;
+}
+
+/**
+ * Warm Cache API from bundled offline-tiles listed in manifest (best-effort, non-blocking).
+ */
+export async function warmCacheFromBundled(onProgress) {
+  const cache = await openCache();
+  if (!cache) return { warmed: 0 };
+  let manifest;
+  try {
+    const res = await fetch(`${appBase()}offline-tiles/manifest.json`);
+    if (!res.ok) return { warmed: 0 };
+    manifest = await res.json();
+  } catch {
+    return { warmed: 0 };
+  }
+
+  // Walk known airport bboxes from manifest if present; otherwise skip heavy walk
+  const airports = manifest.airports || [];
+  if (!airports.length) return { warmed: 0 };
+
+  const zMin = manifest.zoom?.min ?? 12;
+  const zMax = manifest.zoom?.max ?? 15;
+  const jobs = [];
+  const seen = new Set();
+  for (const a of airports) {
+    const bbox = a.bbox;
+    if (!Array.isArray(bbox) || bbox.length !== 4) continue;
+    const [south, west, north, east] = bbox;
+    for (let z = zMin; z <= zMax; z++) {
+      const x0 = lon2tile(west, z);
+      const x1 = lon2tile(east, z);
+      const y0 = lat2tile(north, z);
+      const y1 = lat2tile(south, z);
+      for (let x = x0; x <= x1; x++) {
+        for (let y = y0; y <= y1; y++) {
+          const key = `${z}/${x}/${y}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          jobs.push({ z, x, y });
+        }
+      }
+    }
+  }
+
+  let warmed = 0;
+  const BATCH = 24;
+  for (let i = 0; i < jobs.length; i += BATCH) {
+    const slice = jobs.slice(i, i + BATCH);
+    await Promise.all(
+      slice.map(async ({ z, x, y }) => {
+        const netUrl = tileUrl(z, x, y);
+        try {
+          if (await cache.match(netUrl)) {
+            warmed++;
+            return;
+          }
+          const bundled = await tryBundled(z, x, y);
+          if (!bundled) return;
+          await cache.put(
+            netUrl,
+            new Response(bundled.blob, { headers: { 'Content-Type': 'image/png' } }),
+          );
+          warmed++;
+        } catch {
+          /* ignore */
+        }
+      }),
+    );
+    if (onProgress) onProgress({ warmed, total: jobs.length });
+  }
+  return { warmed, total: jobs.length };
 }

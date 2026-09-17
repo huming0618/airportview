@@ -12,7 +12,8 @@
     "build:offline": "VITE_BASE=./ vite build",
     "build:android": "VITE_BASE=./ vite build && npx cap sync android",
     "prepare-bboxes": "node scripts/prepare-bboxes.js",
-    "cap:sync": "npx cap sync android"
+    "cap:sync": "npx cap sync android",
+    "seed-offline-tiles": "node scripts/download-offline-tiles.js"
   },
   "dependencies": {
     "leaflet": "^1.9.4",

@@ -1,0 +1,133 @@
+{
+  "generatedAt": "2026-09-17T03:49:18.940Z",
+  "zoom": {
+    "min": 12,
+    "max": 15
+  },
+  "airports": [
+    {
+      "iata": "CTU",
+      "name": "Chengdu Shuangliu International Airport",
+      "bbox": [
+        30.50326,
+        103.89097,
+        30.61326,
+        104.00097
+      ],
+      "tileCount": 203
+    },
+    {
+      "iata": "TFU",
+      "name": "Chengdu Tianfu International Airport",
+      "bbox": [
+        30.25752,
+        104.38628,
+        30.36752,
+        104.49628
+      ],
+      "tileCount": 201
+    },
+    {
+      "iata": "PVG",
+      "name": "Shanghai Pudong International Airport",
+      "bbox": [
+        31.0884,
+        121.75,
+        31.1984,
+        121.86
+      ],
+      "tileCount": 201
+    },
+    {
+      "iata": "PEK",
+      "name": "Beijing Capital International Airport",
+      "bbox": [
+        40.02235,
+        116.5417,
+        40.13235,
+        116.6517
+      ],
+      "tileCount": 227
+    },
+    {
+      "iata": "CAN",
+      "name": "Guangzhou Baiyun International Airport",
+      "bbox": [
+        23.3374,
+        113.244,
+        23.4474,
+        113.354
+      ],
+      "tileCount": 194
+    },
+    {
+      "iata": "SHA",
+      "name": "Shanghai Hongqiao International Airport",
+      "bbox": [
+        31.1431,
+        121.27926,
+        31.2531,
+        121.38926
+      ],
+      "tileCount": 207
+    },
+    {
+      "iata": "HKG",
+      "name": "Hong Kong International Airport",
+      "bbox": [
+        22.25684,
+        113.85986,
+        22.36684,
+        113.96986
+      ],
+      "tileCount": 190
+    },
+    {
+      "iata": "LAX",
+      "name": "Los Angeles International Airport",
+      "bbox": [
+        33.8875,
+        -118.463,
+        33.9975,
+        -118.353
+      ],
+      "tileCount": 201
+    },
+    {
+      "iata": "NRT",
+      "name": "Narita International Airport",
+      "bbox": [
+        35.71358,
+        140.33371,
+        35.82358,
+        140.44371
+      ],
+      "tileCount": 203
+    },
+    {
+      "iata": "LHR",
+      "name": "London Heathrow Airport",
+      "bbox": [
+        51.41575,
+        -0.51491,
+        51.52575,
+        -0.40491
+      ],
+      "tileCount": 262
+    }
+  ],
+  "uniqueRequested": 2089,
+  "downloadedOk": 2089,
+  "failed": 0,
+  "skippedExisting": 547,
+  "providersUsed": {
+    "osm": 0,
+    "carto": 1542
+  },
+  "attribution": "Map tiles © OpenStreetMap contributors (ODbL) and/or © CARTO (Positron). Bundled for offline Airport View demo only.",
+  "provider": "Carto Positron (light_all) + OpenStreetMap data",
+  "pathTemplate": "offline-tiles/{z}/{x}/{y}.png",
+  "onDiskPngCount": 2089,
+  "onDiskBytes": 22230948,
+  "onDiskMB": 21.2
+}

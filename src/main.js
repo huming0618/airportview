@@ -9,6 +9,7 @@ import {
   prefetchTiles,
   isOnline,
   countCachedTilesApprox,
+  warmCacheFromBundled,
 } from './tileCache.js';
 
 const OVERPASS_ENDPOINTS = [
@@ -71,7 +72,7 @@ function updateOfflineBanner() {
   if (!isOnline()) {
     el.offlineBanner.hidden = false;
     el.offlineBanner.textContent =
-      '离线模式：机场搜索与本地范围可用；地图瓦片需事先缓存';
+      '离线模式：常用机场已内置离线底图；其他机场仍可联网缓存';
   } else {
     el.offlineBanner.hidden = true;
   }
@@ -640,6 +641,8 @@ async function main() {
   try {
     await loadData();
     addMarkers();
+    // Best-effort: warm Cache API from bundled tiles (does not block UI)
+    warmCacheFromBundled().catch(() => {});
     requestAnimationFrame(() => {
       applyDeepLink();
     });
