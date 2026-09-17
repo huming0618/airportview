@@ -4,6 +4,12 @@ import 'leaflet.markercluster';
 import 'leaflet.markercluster/dist/MarkerCluster.css';
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import './style.css';
+import {
+  createCachedTileLayer,
+  prefetchTiles,
+  isOnline,
+  countCachedTilesApprox,
+} from './tileCache.js';
 
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -30,6 +36,10 @@ let airports = [];
 let selected = null;
 /** @type {AbortController|null} */
 let overpassAbort = null;
+/** @type {import('leaflet').TileLayer|null} */
+let baseTiles = null;
+let offlineTileWarned = false;
+let prefetching = false;
 
 const el = {
   input: document.getElementById('search-input'),
@@ -42,6 +52,8 @@ const el = {
   codes: document.getElementById('sheet-codes'),
   btnFit: document.getElementById('btn-fit'),
   btnWorld: document.getElementById('btn-world'),
+  btnCache: document.getElementById('btn-cache'),
+  offlineBanner: document.getElementById('offline-banner'),
 };
 
 function showStatus(text) {
@@ -54,6 +66,17 @@ function showStatus(text) {
   el.status.textContent = text;
 }
 
+function updateOfflineBanner() {
+  if (!el.offlineBanner) return;
+  if (!isOnline()) {
+    el.offlineBanner.hidden = false;
+    el.offlineBanner.textContent =
+      '离线模式：机场搜索与本地范围可用；地图瓦片需事先缓存';
+  } else {
+    el.offlineBanner.hidden = true;
+  }
+}
+
 function initMap() {
   map = L.map('map', {
     zoomControl: false,
@@ -63,11 +86,17 @@ function initMap() {
 
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  }).addTo(map);
+  baseTiles = createCachedTileLayer(L);
+  baseTiles.addTo(map);
+  baseTiles.on('tileoffline', () => {
+    if (offlineTileWarned) return;
+    offlineTileWarned = true;
+    showStatus('请先联网缓存该机场周边地图');
+    setTimeout(() => {
+      showStatus('');
+      offlineTileWarned = false;
+    }, 3500);
+  });
 
   cluster = L.markerClusterGroup({
     maxClusterRadius: 50,
@@ -79,8 +108,17 @@ function initMap() {
 
   outlineLayer = L.layerGroup().addTo(map);
 
-  // Fix marker icon paths when bundling with Vite
-  // Using divIcon instead of default icon images.
+  window.addEventListener('online', () => {
+    updateOfflineBanner();
+    showStatus('网络已恢复');
+    setTimeout(() => showStatus(''), 1500);
+  });
+  window.addEventListener('offline', () => {
+    updateOfflineBanner();
+    showStatus('已进入离线模式');
+    setTimeout(() => showStatus(''), 2000);
+  });
+  updateOfflineBanner();
 }
 
 function airportLabel(a) {
@@ -169,7 +207,10 @@ function openSheet(a) {
   if (a.icao) codes.push(`ICAO ${a.icao}`);
   el.codes.textContent = codes.join(' · ') || a.ident;
   el.sheet.hidden = false;
-  // Give Leaflet room for bottom sheet
+  if (el.btnCache) {
+    el.btnCache.disabled = prefetching;
+    el.btnCache.hidden = false;
+  }
   setTimeout(() => map.invalidateSize(), 50);
 }
 
@@ -183,6 +224,16 @@ function fallbackBounds(a) {
     [a.lat - half, a.lon - half],
     [a.lat + half, a.lon + half],
   );
+}
+
+/** Prefer baked bbox [south, west, north, east] on airport record. */
+function localBounds(a) {
+  if (Array.isArray(a.bbox) && a.bbox.length === 4) {
+    const [s, w, n, e] = a.bbox;
+    const b = L.latLngBounds([s, w], [n, e]);
+    if (b.isValid()) return b;
+  }
+  return fallbackBounds(a);
 }
 
 function collectCoords(geom) {
@@ -247,9 +298,9 @@ function pickBestAerodromeFeatures(features, a) {
   candidates.sort((x, y) => x.dist - y.dist);
   const best = candidates[0];
 
-  // Keep only features that clearly belong to the same footprint
-  // (near the best match), so neighboring airports are not merged.
-  const maxExtra = Math.max(best.b.getNorth() - best.b.getSouth(), best.b.getEast() - best.b.getWest()) * 0.35;
+  const maxExtra =
+    Math.max(best.b.getNorth() - best.b.getSouth(), best.b.getEast() - best.b.getWest()) *
+    0.35;
   const kept = [];
   for (const c of candidates) {
     if (c === best) {
@@ -284,10 +335,7 @@ function boundsFromOverpass(geojson, a) {
     if (!coords.length) continue;
     const b = L.latLngBounds(coords);
     bounds = bounds ? bounds.extend(b) : b;
-    if (
-      f.geometry?.type === 'Polygon' ||
-      f.geometry?.type === 'MultiPolygon'
-    ) {
+    if (f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon') {
       outlineFeatures.push(f);
     }
   }
@@ -297,7 +345,6 @@ function boundsFromOverpass(geojson, a) {
 
 async function queryOverpass(a, signal) {
   const radius = a.type === 'large' ? 12000 : a.type === 'medium' ? 8000 : 5000;
-  // Around airport; fetch aerodrome ways/relations (footprint)
   const query = `
 [out:json][timeout:25];
 (
@@ -318,7 +365,6 @@ out geom;
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      // Convert OSM elements with geometry to GeoJSON-like features
       const features = osmToFeatures(data.elements || []);
       return { type: 'FeatureCollection', features };
     } catch (err) {
@@ -334,7 +380,6 @@ function osmToFeatures(elements) {
   for (const el of elements) {
     if (el.type === 'way' && Array.isArray(el.geometry) && el.geometry.length >= 3) {
       const ring = el.geometry.map((p) => [p.lon, p.lat]);
-      // close ring
       const first = ring[0];
       const last = ring[ring.length - 1];
       if (first[0] !== last[0] || first[1] !== last[1]) ring.push([...first]);
@@ -344,7 +389,6 @@ function osmToFeatures(elements) {
         geometry: { type: 'Polygon', coordinates: [ring] },
       });
     } else if (el.type === 'relation' && Array.isArray(el.members)) {
-      // Collect outer ways
       const outers = [];
       for (const m of el.members) {
         if (m.role === 'outer' && Array.isArray(m.geometry) && m.geometry.length >= 2) {
@@ -391,36 +435,13 @@ function drawOutline(features) {
   ).addTo(outlineLayer);
 }
 
-async function fitAirport(a) {
-  if (overpassAbort) overpassAbort.abort();
-  overpassAbort = new AbortController();
-  const { signal } = overpassAbort;
-
-  showStatus('正在获取机场范围…');
-  outlineLayer.clearLayers();
-
-  let bounds = null;
-  try {
-    const geojson = await queryOverpass(a, signal);
-    const parsed = boundsFromOverpass(geojson, a);
-    if (parsed?.bounds && parsed.bounds.isValid()) {
-      bounds = parsed.bounds;
-      drawOutline(parsed.outlineFeatures);
-      showStatus('已按 OSM 机场边界适配');
-    } else {
-      bounds = fallbackBounds(a);
-      showStatus('未找到边界，使用估算范围');
-    }
-  } catch (err) {
-    if (err.name === 'AbortError') return;
-    console.warn('Overpass failed', err);
-    bounds = fallbackBounds(a);
-    showStatus('Overpass 超时/失败，使用估算范围');
-  }
-
-  // Mobile padding: top search + bottom sheet — keep whole airport on one screen
-  const padTop = 72 + (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--safe-top')) || 0);
-  const padBottom = el.sheet.hidden ? 24 : 170;
+function applyFit(bounds) {
+  const padTop =
+    72 +
+    (parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue('--safe-top'),
+    ) || 0);
+  const padBottom = el.sheet.hidden ? 24 : 200;
   map.invalidateSize();
   map.fitBounds(bounds, {
     paddingTopLeft: [16, padTop],
@@ -428,8 +449,81 @@ async function fitAirport(a) {
     maxZoom: 15,
     animate: true,
   });
+}
+
+/**
+ * Offline-first fit:
+ * 1) local baked bbox
+ * 2) Overpass only if online and we want finer outline (optional upgrade)
+ * 3) type fallback already covered by localBounds
+ */
+async function fitAirport(a) {
+  if (overpassAbort) overpassAbort.abort();
+  overpassAbort = new AbortController();
+  const { signal } = overpassAbort;
+
+  outlineLayer.clearLayers();
+
+  const baked = localBounds(a);
+  applyFit(baked);
+
+  if (!isOnline()) {
+    showStatus('离线：已按本地范围适配');
+    setTimeout(() => showStatus(''), 2200);
+    return;
+  }
+
+  // Online: try Overpass for better outline (non-blocking after local fit)
+  showStatus('正在获取精确机场边界…');
+  try {
+    const geojson = await queryOverpass(a, signal);
+    const parsed = boundsFromOverpass(geojson, a);
+    if (parsed?.bounds && parsed.bounds.isValid()) {
+      drawOutline(parsed.outlineFeatures);
+      applyFit(parsed.bounds);
+      showStatus('已按 OSM 机场边界适配');
+    } else {
+      showStatus('未找到精确边界，使用本地范围');
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    console.warn('Overpass failed', err);
+    showStatus('Overpass 失败，使用本地范围');
+  }
 
   setTimeout(() => showStatus(''), 2200);
+}
+
+async function cacheSelectedAirport() {
+  if (!selected || prefetching) return;
+  if (!isOnline()) {
+    showStatus('请先联网缓存该机场周边地图');
+    setTimeout(() => showStatus(''), 2500);
+    return;
+  }
+  prefetching = true;
+  if (el.btnCache) el.btnCache.disabled = true;
+  const bounds = localBounds(selected).pad(0.15);
+  showStatus('正在缓存离线地图… 0%');
+  try {
+    const result = await prefetchTiles(bounds, 12, 16, ({ done, total }) => {
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      showStatus(`正在缓存离线地图… ${pct}%`);
+    });
+    const n = await countCachedTilesApprox();
+    showStatus(
+      `已缓存 ${result.ok}/${result.total} 瓦片（库内约 ${n}）${
+        result.truncated ? '（已限流截断）' : ''
+      }`,
+    );
+  } catch (err) {
+    console.warn(err);
+    showStatus('缓存失败：' + (err.message || '未知错误'));
+  } finally {
+    prefetching = false;
+    if (el.btnCache) el.btnCache.disabled = false;
+    setTimeout(() => showStatus(''), 3500);
+  }
 }
 
 function selectAirport(a, { fit = true } = {}) {
@@ -486,16 +580,18 @@ function wireUi() {
 
   el.btnWorld.addEventListener('click', goWorld);
 
+  if (el.btnCache) {
+    el.btnCache.addEventListener('click', () => cacheSelectedAirport());
+  }
+
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       el.results.hidden = true;
     }
   });
-
 }
 
 function applyDeepLink() {
-  // Deep link: ?q=CTU or #CTU / #PVG — must run after airports.json is loaded
   const params = new URLSearchParams(location.search);
   let q = params.get('q') || params.get('iata') || '';
   if (!q && location.hash.length > 1) {
@@ -518,7 +614,6 @@ function applyDeepLink() {
     return false;
   }
 
-  // Prefer exact IATA / ICAO / ident match when the query looks like a code
   const upper = normalizeQuery(q);
   const exact =
     hits.find((a) => a.iata === upper) ||
@@ -545,7 +640,6 @@ async function main() {
   try {
     await loadData();
     addMarkers();
-    // Wait a tick so markers/cluster + sheet layout exist before fitBounds
     requestAnimationFrame(() => {
       applyDeepLink();
     });

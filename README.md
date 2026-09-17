@@ -90,3 +90,13 @@ OSM tile attribution is shown on the map: © OpenStreetMap contributors.
 ## License / credits
 
 Airport metadata © OurAirports contributors. Map data © OpenStreetMap contributors.
+
+## Android 离线版
+
+见 [docs/android-offline-build.md](docs/android-offline-build.md)。调试 APK 需本地用 Android SDK 构建（不入库）。
+
+```bash
+npm install
+npm run build:android
+cd android && ./gradlew assembleDebug
+```

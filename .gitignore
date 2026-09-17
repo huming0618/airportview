@@ -6,3 +6,14 @@ dist/
 .env.*
 tmp/
 /tmp/
+
+# Android / Capacitor
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+node_modules/
+dist/
