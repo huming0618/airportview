@@ -311,11 +311,6 @@ body,
   text-align: center;
 }
 
-.sheet-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
 
 .btn.accent {
   background: #0ea5e9;
