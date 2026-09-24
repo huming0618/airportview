@@ -10,6 +10,9 @@ import {
   isOnline,
   countCachedTilesApprox,
   warmCacheFromBundled,
+  syncOfflineZoomLimits,
+  SEEDED_MAX_ZOOM,
+  resolveAssetUrl,
 } from './tileCache.js';
 
 const OVERPASS_ENDPOINTS = [
@@ -89,13 +92,23 @@ function initMap() {
 
   baseTiles = createCachedTileLayer(L);
   baseTiles.addTo(map);
+  syncOfflineZoomLimits(map, baseTiles);
+  // Debounce: ignore tileoffline while bundled warm-up may still be racing first paint
+  let tileMissCount = 0;
   baseTiles.on('tileoffline', () => {
-    if (offlineTileWarned) return;
+    tileMissCount += 1;
+    // Only warn after several misses (world view / unseeded airports), not first paint flicker
+    if (offlineTileWarned || tileMissCount < 3) return;
     offlineTileWarned = true;
-    showStatus('请先联网缓存该机场周边地图');
+    showStatus(
+      isOnline()
+        ? '部分底图加载失败，可稍后重试或缓存该机场'
+        : '请先联网缓存该机场周边地图（常用机场已内置离线底图）',
+    );
     setTimeout(() => {
       showStatus('');
       offlineTileWarned = false;
+      tileMissCount = 0;
     }, 3500);
   });
 
@@ -110,13 +123,15 @@ function initMap() {
   outlineLayer = L.layerGroup().addTo(map);
 
   window.addEventListener('online', () => {
+    syncOfflineZoomLimits(map, baseTiles);
     updateOfflineBanner();
     showStatus('网络已恢复');
     setTimeout(() => showStatus(''), 1500);
   });
   window.addEventListener('offline', () => {
+    syncOfflineZoomLimits(map, baseTiles);
     updateOfflineBanner();
-    showStatus('已进入离线模式');
+    showStatus('已进入离线模式（底图缩放上限 z' + SEEDED_MAX_ZOOM + '）');
     setTimeout(() => showStatus(''), 2000);
   });
   updateOfflineBanner();
@@ -447,7 +462,7 @@ function applyFit(bounds) {
   map.fitBounds(bounds, {
     paddingTopLeft: [16, padTop],
     paddingBottomRight: [16, padBottom],
-    maxZoom: 15,
+    maxZoom: isOnline() ? 15 : SEEDED_MAX_ZOOM,
     animate: true,
   });
 }
@@ -628,7 +643,7 @@ function applyDeepLink() {
 
 async function loadData() {
   showStatus('加载机场数据…');
-  const res = await fetch(`${import.meta.env.BASE_URL}data/airports.json`);
+  const res = await fetch(resolveAssetUrl('data/airports.json'));
   if (!res.ok) throw new Error('无法加载 airports.json');
   airports = await res.json();
   showStatus(`已加载 ${airports.length} 个机场`);
@@ -641,10 +656,20 @@ async function main() {
   try {
     await loadData();
     addMarkers();
-    // Best-effort: warm Cache API from bundled tiles (does not block UI)
-    warmCacheFromBundled().catch(() => {});
+    // Warm Cache API from bundled tiles; await briefly so first airport fit hits cache.
+    // Hard-cap wait so a slow WebView cannot block UI forever.
+    const warmPromise = warmCacheFromBundled().catch(() => ({ warmed: 0 }));
+    await Promise.race([
+      warmPromise,
+      new Promise((r) => setTimeout(r, 2500)),
+    ]);
+    syncOfflineZoomLimits(map, baseTiles);
     requestAnimationFrame(() => {
       applyDeepLink();
+    });
+    // Let remaining warm finish in background
+    warmPromise.then((r) => {
+      if (r?.warmed) console.info('[tiles] warmed', r.warmed, '/', r.total ?? '?');
     });
   } catch (err) {
     console.error(err);

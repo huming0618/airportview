@@ -13,7 +13,7 @@ Capacitor 包装的现有 Vite + Leaflet Web 应用，面向 Android 的离线 M
 | L2 | 每机场预置 `bbox`，一屏适配不依赖 Overpass |
 | L3 | **常用机场（CTU/TFU/PVG/PEK/CAN/SHA/HKG/LAX/NRT/LHR）内置 z12–z15 离线底图**；其它机场可联网缓存 |
 
-瓦片加载：内置 `offline-tiles/` → Cache API → 网络。详见 [docs/android-offline-build.md](docs/android-offline-build.md)。
+瓦片加载：内置 `offline-tiles/` → Cache API → OSM → Carto 回退。离线 maxZoom≤15。详见 [docs/android-offline-build.md](docs/android-offline-build.md) / [docs/android-offline-v3-fix.md](docs/android-offline-v3-fix.md)。
 
 ## 快速构建
 

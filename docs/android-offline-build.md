@@ -21,9 +21,11 @@ Capacitor 包装的 Vite + Leaflet Web 应用，面向 Android 的离线 MVP。
 
 瓦片加载顺序：
 
-1. 内置 `offline-tiles/{z}/{x}/{y}.png`（`import.meta.env.BASE_URL`）
+1. 内置 `offline-tiles/{z}/{x}/{y}.png`（绝对 URL，见 `resolveAssetUrl`）
 2. Cache API（运行时缓存）
-3. 网络（在线时）
+3. 网络 OSM → 失败则 Carto Positron（在线时）
+
+离线时地图 `maxZoom` 限制为 15（与预置 z12–z15 一致）；详见 [android-offline-v3-fix.md](./android-offline-v3-fix.md)。
 
 首次启动会尽量把内置瓦片暖进 Cache API（best-effort）。其它机场仍需联网点「缓存此机场离线地图」。
 
